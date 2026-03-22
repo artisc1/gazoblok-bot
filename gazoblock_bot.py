@@ -109,8 +109,7 @@ def handle(chat_id, text):
         user_states[chat_id]  = "menu"
         user_data[chat_id]    = {}
         user_history[chat_id] = []
-        send(chat_id, "👋 Сәлем! Привет!\n\nМен газоблок бойынша сізге көмектесемін.\nЯ помогу рассчитать газоблок для вашего дома.")
-        main_menu(chat_id)
+        main_menu(chat_id, "👋 Сәлем! Привет!\n\nЯ помогу рассчитать газоблок для вашего дома.\n\nВыберите действие 👇")
         return
 
     # Назад
