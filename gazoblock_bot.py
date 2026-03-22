@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Газоблок бот - использует requests (без ConversationHandler)
-"""
-import os
-import logging
-import requests
+import os, logging, requests, re, time
 import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO)
@@ -12,9 +7,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-
 genai.configure(api_key=GEMINI_API_KEY)
-
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 BLOCKS = {
@@ -27,61 +20,68 @@ BLOCKS = {
 
 SYSTEM_PROMPT = """Ты — консультант по газоблокам компании из Алматы.
 Отвечаешь на русском и казахском языке.
-
 Данные о блоках (цена 30 000 тенге/м³ с НДС, без доставки):
-- Б1 (100мм): 96 шт/поддон
-- Б1.5 (150мм): 64 шт/поддон
-- Б2 (200мм): 48 шт/поддон
-- Б2.5 (250мм): 40 шт/поддон
-- Б3 (300мм): 35 шт/поддон
-
-Формула: V = (P x H - S_проёмов) x T. Запас 6%. Клей: 1 мешок 25кг на 1м³.
+Б1(100мм):96шт/поддон, Б1.5(150мм):64шт/поддон, Б2(200мм):48шт/поддон, Б2.5(250мм):40шт/поддон, Б3(300мм):35шт/поддон
+Формула: V=(P×H-S_проёмов)×T. Запас 6%. Клей: 1 мешок 25кг на 1м³.
 Контакт: +7 771 799 92 91 (Наталья), Боралдай, Промзона 71.
-Отвечай кратко и дружелюбно. Не используй markdown форматирование."""
+Отвечай кратко и дружелюбно. Без markdown."""
 
-# Хранилище состояний пользователей
-user_states = {}
-user_data = {}
-user_history = {}
+user_states   = {}
+user_data     = {}
+user_history  = {}
 
-def send_message(chat_id, text, keyboard=None):
-    data = {"chat_id": chat_id, "text": text}
-    if keyboard:
-        data["reply_markup"] = {"keyboard": keyboard, "resize_keyboard": True}
-    requests.post(f"{BASE_URL}/sendMessage", json=data)
+MAIN_KB = [["🧮 Расчёт блоков", "❓ Вопрос"], ["📞 Контакты"]]
+BLOCK_KB = [["Б1 (100мм)", "Б1.5 (150мм)"], ["Б2 (200мм)", "Б2.5 (250мм)"], ["Б3 (300мм)"], ["⬅️ Назад"]]
 
-def main_menu(chat_id):
-    send_message(chat_id,
-        "Выберите действие / Әрекет таңдаңыз:",
-        [
-            ["🧮 Расчёт блоков"],
-            ["❓ Вопрос про газоблок"],
-            ["📞 Контакты"],
-        ]
-    )
+def send(chat_id, text, kb=None):
+    body = {"chat_id": chat_id, "text": text}
+    if kb is not None:
+        body["reply_markup"] = {"keyboard": kb, "resize_keyboard": True, "one_time_keyboard": False}
+    try:
+        requests.post(f"{BASE_URL}/sendMessage", json=body, timeout=10)
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+
+def main_menu(chat_id, msg="Выберите действие / Әрекет таңдаңыз:"):
+    user_states[chat_id] = "menu"
+    send(chat_id, msg, MAIN_KB)
 
 def ask_gemini(question, history):
     try:
         model = genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
         chat_history = [{"role": "user" if m["role"]=="user" else "model", "parts": [m["content"]]} for m in history]
         chat = model.start_chat(history=chat_history)
-        response = chat.send_message(question)
-        return response.text
+        return chat.send_message(question).text
     except Exception as e:
         logger.error(f"Gemini error: {e}")
-        return "Қате болды. Кейінірек қайталаңыз. / Ошибка. Попробуйте позже."
+        return "Қате болды. Кейінірек қайталаңыз. / Ошибка, попробуйте позже."
+
+def find_block(text):
+    clean = text.lower().replace(" ","").replace(",",".") \
+                .replace("(100мм)","").replace("(150мм)","") \
+                .replace("(200мм)","").replace("(250мм)","").replace("(300мм)","")
+    if clean in BLOCKS:
+        return clean
+    for key in BLOCKS:
+        if key in clean:
+            return key
+    m = re.search(r'б(\d+\.?\d*)', clean)
+    if m:
+        c = "б" + m.group(1)
+        if c in BLOCKS:
+            return c
+    return None
 
 def calculate(d):
     b = BLOCKS[d["block"]]
     T = b["thickness"]
-    perimeter = 2 * (d["length"] + d["width"]) + d["inner_walls"]
+    perimeter = 2*(d["length"]+d["width"]) + d["inner_walls"]
     net_area = perimeter * d["height"] * d["floors"] - d["openings"]
     volume = net_area * T
     vol_r = volume * 1.06
     pieces = vol_r / b["volume"]
     pallets = pieces / b["per_pallet"]
     cost = vol_r * b["price_m3"]
-
     return (
         f"✅ Результат расчёта / Есеп нәтижесі\n\n"
         f"🏠 Дом: {d['length']}x{d['width']} м, {d['floors']} этаж, высота {d['height']} м\n"
@@ -98,41 +98,30 @@ def calculate(d):
         f"📞 Заказ: +7 771 799 92 91 (Наталья)"
     )
 
-def handle_message(chat_id, text):
+def handle(chat_id, text):
     text = text.strip()
     state = user_states.get(chat_id, "menu")
-    data = user_data.get(chat_id, {})
+    data  = user_data.get(chat_id, {})
     history = user_history.get(chat_id, [])
 
-    # Команда старт
-    if text in ["/start", "/start@Almatygazablokbot"]:
-        user_states[chat_id] = "menu"
-        user_data[chat_id] = {}
+    # /start
+    if text.startswith("/start"):
+        user_states[chat_id]  = "menu"
+        user_data[chat_id]    = {}
         user_history[chat_id] = []
-        send_message(chat_id,
-            "👋 Сәлем! Привет!\n\nМен газоблок бойынша сізге көмектесемін.\nЯ помогу рассчитать газоблок для вашего дома.")
+        send(chat_id, "👋 Сәлем! Привет!\n\nМен газоблок бойынша сізге көмектесемін.\nЯ помогу рассчитать газоблок для вашего дома.")
         main_menu(chat_id)
         return
 
-    # Главное меню
-    if "Расчёт" in text or "есептеу" in text.lower():
-        user_states[chat_id] = "choose_block"
+    # Назад
+    if "Назад" in text or text == "⬅️":
         user_data[chat_id] = {}
-        send_message(chat_id, "Какой тип блока выбираете?", [
-            ["Б1 (100мм)", "Б1.5 (150мм)"],
-            ["Б2 (200мм)", "Б2.5 (250мм)"],
-            ["Б3 (300мм)"],
-            ["⬅️ Назад"],
-        ])
+        main_menu(chat_id)
         return
 
-    if "Вопрос" in text or "Сұрақ" in text:
-        user_states[chat_id] = "question"
-        send_message(chat_id, "Напишите ваш вопрос про газоблок 👇\nГазоблок туралы сұрағыңызды жазыңыз 👇")
-        return
-
-    if "Контакт" in text or "Байланыс" in text or "📞" in text:
-        send_message(chat_id,
+    # Контакты
+    if "Контакт" in text or "📞" in text:
+        send(chat_id,
             "📞 Наши контакты:\n\n"
             "👤 Наталья: +7 771 799 92 91\n"
             "📍 Алматинская обл., Боралдай,\n"
@@ -141,103 +130,86 @@ def handle_message(chat_id, text):
         main_menu(chat_id)
         return
 
-    if "Назад" in text or "⬅️" in text:
-        user_states[chat_id] = "menu"
-        user_data[chat_id] = {}
-        main_menu(chat_id)
+    # Расчёт блоков
+    if "Расчёт" in text or "расчёт" in text.lower() or "есептеу" in text.lower():
+        user_states[chat_id] = "choose_block"
+        user_data[chat_id]   = {}
+        send(chat_id, "Какой тип блока выбираете? / Қандай блок таңдайсыз?", BLOCK_KB)
         return
 
-    # Выбор блока
+    # Вопрос
+    if "Вопрос" in text or "❓" in text or "Сұрақ" in text:
+        user_states[chat_id] = "question"
+        send(chat_id, "Напишите ваш вопрос про газоблок 👇\nГазоблок туралы сұрағыңызды жазыңыз 👇")
+        return
+
+    # --- Шаги расчёта ---
     if state == "choose_block":
-        # Распознаём блок в любом написании
-        import re
-        clean = text.lower().replace(" ", "").replace(",", ".") \
-                    .replace("(100мм)","").replace("(150мм)","") \
-                    .replace("(200мм)","").replace("(250мм)","").replace("(300мм)","")
-        block_key = None
-        if clean in BLOCKS:
-            block_key = clean
-        else:
-            for key in BLOCKS:
-                if key in clean:
-                    block_key = key
-                    break
-        if block_key is None:
-            m = re.search(r'б(\d+\.?\d*)', clean)
-            if m:
-                candidate = "б" + m.group(1)
-                if candidate in BLOCKS:
-                    block_key = candidate
-        if block_key in BLOCKS:
-            user_data[chat_id]["block"] = block_key
+        key = find_block(text)
+        if key:
+            user_data[chat_id] = {"block": key}
             user_states[chat_id] = "get_length"
-            send_message(chat_id, f"✅ {BLOCKS[block_key]['name']} выбран.\n\nВведите длину дома в метрах (например: 14):")
+            send(chat_id, f"✅ {BLOCKS[key]['name']} выбран.\n\nВведите длину дома в метрах (например: 14):")
         else:
-            send_message(chat_id, "Выберите блок из списка 👆")
+            send(chat_id, "Пожалуйста выберите блок из списка 👆", BLOCK_KB)
         return
 
-    # Сбор размеров
     if state == "get_length":
         try:
-            val = float(text.replace(",", "."))
-            user_data[chat_id]["length"] = val
+            user_data[chat_id]["length"] = float(text.replace(",","."))
             user_states[chat_id] = "get_width"
-            send_message(chat_id, "Введите ширину дома в метрах (например: 14):")
+            send(chat_id, "Введите ширину дома в метрах (например: 14):")
         except:
-            send_message(chat_id, "❗ Введите число, например: 14")
+            send(chat_id, "❗ Введите число, например: 14")
         return
 
     if state == "get_width":
         try:
-            val = float(text.replace(",", "."))
-            user_data[chat_id]["width"] = val
+            user_data[chat_id]["width"] = float(text.replace(",","."))
             user_states[chat_id] = "get_height"
-            send_message(chat_id, "Введите высоту стен в метрах (например: 3):")
+            send(chat_id, "Введите высоту стен в метрах (например: 3):")
         except:
-            send_message(chat_id, "❗ Введите число, например: 14")
+            send(chat_id, "❗ Введите число, например: 14")
         return
 
     if state == "get_height":
         try:
-            val = float(text.replace(",", "."))
-            user_data[chat_id]["height"] = val
+            user_data[chat_id]["height"] = float(text.replace(",","."))
             user_states[chat_id] = "get_floors"
-            send_message(chat_id, "Количество этажей (1, 2 или 3):")
+            send(chat_id, "Количество этажей (введите цифру: 1, 2 или 3):")
         except:
-            send_message(chat_id, "❗ Введите число, например: 3")
+            send(chat_id, "❗ Введите число, например: 3")
         return
 
     if state == "get_floors":
         try:
-            val = int(text)
+            val = int(float(text.replace(",",".")))
             if val < 1 or val > 5: raise ValueError
             user_data[chat_id]["floors"] = val
             user_states[chat_id] = "get_openings"
-            send_message(chat_id, "Общая площадь окон и дверей в м²\n(если не знаете — напишите 30):")
+            send(chat_id, "Общая площадь окон и дверей в м²\n(если не знаете — напишите 30):")
         except:
-            send_message(chat_id, "❗ Введите число от 1 до 5")
+            send(chat_id, "❗ Введите цифру от 1 до 5, например: 1")
         return
 
     if state == "get_openings":
         try:
-            val = float(text.replace(",", "."))
-            user_data[chat_id]["openings"] = val
+            user_data[chat_id]["openings"] = float(text.replace(",","."))
             user_states[chat_id] = "get_inner_walls"
-            send_message(chat_id, "Суммарная длина несущих внутренних стен в метрах\n(если не знаете — напишите 0):")
+            send(chat_id, "Суммарная длина несущих внутренних стен в метрах\n(если не знаете — напишите 0):")
         except:
-            send_message(chat_id, "❗ Введите число, например: 30")
+            send(chat_id, "❗ Введите число, например: 34")
         return
 
     if state == "get_inner_walls":
         try:
-            val = float(text.replace(",", "."))
-            user_data[chat_id]["inner_walls"] = val
+            user_data[chat_id]["inner_walls"] = float(text.replace(",","."))
             result = calculate(user_data[chat_id])
-            user_states[chat_id] = "menu"
-            send_message(chat_id, result)
-            main_menu(chat_id)
-        except:
-            send_message(chat_id, "❗ Введите число, например: 28")
+            user_data[chat_id] = {}
+            main_menu(chat_id, result + "\n\n─────────────────")
+        except Exception as e:
+            logger.error(f"Calc error: {e}")
+            send(chat_id, "❗ Введите число, например: 28")
         return
 
     # Вопрос через Gemini
@@ -246,37 +218,35 @@ def handle_message(chat_id, text):
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": answer})
         user_history[chat_id] = history[-10:]
-        send_message(chat_id, answer)
+        send(chat_id, answer)
         main_menu(chat_id)
         return
 
-    # Любой другой текст — спрашиваем Gemini
+    # Любой другой текст → Gemini
     answer = ask_gemini(text, history)
     history.append({"role": "user", "content": text})
     history.append({"role": "assistant", "content": answer})
     user_history[chat_id] = history[-10:]
-    send_message(chat_id, answer)
+    send(chat_id, answer)
     main_menu(chat_id)
 
 def main():
-    logger.info("Бот запущен (polling через requests)!")
+    logger.info("Бот запущен!")
     offset = 0
     while True:
         try:
-            resp = requests.get(f"{BASE_URL}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
-            updates = resp.json().get("result", [])
-            for update in updates:
+            resp = requests.get(f"{BASE_URL}/getUpdates",
+                                params={"offset": offset, "timeout": 30}, timeout=35)
+            for update in resp.json().get("result", []):
                 offset = update["update_id"] + 1
-                if "message" in update and "text" in update["message"]:
-                    chat_id = update["message"]["chat"]["id"]
-                    text = update["message"]["text"]
+                msg = update.get("message", {})
+                if msg.get("text"):
                     try:
-                        handle_message(chat_id, text)
+                        handle(msg["chat"]["id"], msg["text"])
                     except Exception as e:
                         logger.error(f"Handler error: {e}")
         except Exception as e:
             logger.error(f"Polling error: {e}")
-            import time
             time.sleep(5)
 
 if __name__ == "__main__":
