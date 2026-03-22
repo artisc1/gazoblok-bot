@@ -149,7 +149,25 @@ def handle_message(chat_id, text):
 
     # Выбор блока
     if state == "choose_block":
-        block_key = text.lower().replace(" ", "").replace("(100мм)","").replace("(150мм)","").replace("(200мм)","").replace("(250мм)","").replace("(300мм)","")
+        # Распознаём блок в любом написании
+        import re
+        clean = text.lower().replace(" ", "").replace(",", ".") \
+                    .replace("(100мм)","").replace("(150мм)","") \
+                    .replace("(200мм)","").replace("(250мм)","").replace("(300мм)","")
+        block_key = None
+        if clean in BLOCKS:
+            block_key = clean
+        else:
+            for key in BLOCKS:
+                if key in clean:
+                    block_key = key
+                    break
+        if block_key is None:
+            m = re.search(r'б(\d+\.?\d*)', clean)
+            if m:
+                candidate = "б" + m.group(1)
+                if candidate in BLOCKS:
+                    block_key = candidate
         if block_key in BLOCKS:
             user_data[chat_id]["block"] = block_key
             user_states[chat_id] = "get_length"
