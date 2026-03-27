@@ -162,6 +162,15 @@ def handle(chat_id, text):
             "Я помогу рассчитать газоблок для вашего дома.")
         return
 
+    # Состояния в которых идёт расчёт — не прерываем кнопками меню
+    CALC_STATES = {
+        "get_length", "get_width", "get_height", "get_floors",
+        "get_inner_walls", "get_window_count", "get_window_size",
+        "get_front_door_count", "get_front_door_size",
+        "get_inner_door_count", "get_inner_door_size",
+        "get_columns", "get_column_count"
+    }
+
     if "Назад" in text or "Артқа" in text:
         user_data[chat_id] = {}
         main_menu(chat_id)
@@ -177,16 +186,18 @@ def handle(chat_id, text):
         main_menu(chat_id)
         return
 
-    if "есептеу" in text.lower() or "Расчёт" in text or "расчет" in text.lower() or "🧮" in text:
-        user_states[chat_id] = "choose_block"
-        user_data[chat_id]   = {}
-        send(chat_id, "Қандай блок? / Какой тип блока?", BLOCK_KB)
-        return
+    # Кнопки меню не прерывают активный расчёт
+    if state not in CALC_STATES:
+        if "есептеу" in text.lower() or "Расчёт" in text or "расчет" in text.lower() or "🧮" in text:
+            user_states[chat_id] = "choose_block"
+            user_data[chat_id]   = {}
+            send(chat_id, "Қандай блок? / Какой тип блока?", BLOCK_KB)
+            return
 
-    if "Сұрақ" in text or "Вопрос" in text or "❓" in text:
-        user_states[chat_id] = "question"
-        send(chat_id, "Сұрағыңызды жазыңыз 👇\nНапишите ваш вопрос 👇")
-        return
+        if "Сұрақ" in text or "Вопрос" in text or "❓" in text:
+            user_states[chat_id] = "question"
+            send(chat_id, "Сұрағыңызды жазыңыз 👇\nНапишите ваш вопрос 👇")
+            return
 
     # ── Шаги расчёта ──────────────────────────────────────────────────────────
 
